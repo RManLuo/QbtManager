@@ -54,6 +54,12 @@ namespace QbtManager
         /// </summary>
         [DataMember]
         public int? max_seeding_time { get; set; }
+        
+        /// <summary>
+        /// -1 = no limit, -2 = global limit, other value = minutes to seed for this torrent while inactive
+        /// </summary>
+        [DataMember]
+        public int? max_inactive_seeding_time { get; set; }
         [DataMember]
         public int? up_limit { get; set; }
         [DataMember]

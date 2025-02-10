@@ -18,6 +18,7 @@ namespace QbtManager
     {
         private readonly RestClient client;
         private readonly QBittorrentSettings settings;
+        private Version? qbtVersion;
 
         public class Tracker
         {
@@ -37,6 +38,7 @@ namespace QbtManager
             public int up_limit { get; set; }
             public float max_ratio { get; set; }
             public int max_seeding_time { get; set; }
+            public int max_inactive_seeding_time { get; set; }
             public DateTime added_on { get; set; }
             public DateTime completed_on { get; set; }
             public List<Tracker> trackers { get; set; }
@@ -102,6 +104,21 @@ namespace QbtManager
             return false;
         }
 
+        public void GetQBTVersion()
+        {
+            // Dont use ?filter=completed here - we'll filter ourselves.
+            var versionStr = MakeRestRequest("/app/version", null);
+
+            if (!string.IsNullOrEmpty(versionStr))
+            {
+                if( versionStr.StartsWith("v") )
+                    versionStr = versionStr.Substring(1);
+                
+                qbtVersion = new Version(versionStr);
+                Utils.Log( $"QBT Version is: {qbtVersion}");
+            }
+        }
+        
         /// <summary>
         /// Get the list of torrents
         /// </summary>
@@ -164,10 +181,18 @@ namespace QbtManager
         /// <returns></returns>
         public bool PauseTask(string[] taskIds)
         {
+            // Handle the fact that pause => stop in QBT v5
+            var command = qbtVersion != null && qbtVersion.Major < 5 ? "pause" : "stop";
             var parms = new Dictionary<string, string>();
 
-            parms["hashes"] = string.Join("|", taskIds);
-            return ExecuteCommand("/torrents/pause", parms);
+            foreach (var chunk in taskIds.Chunk(30))
+            {
+                parms["hashes"] = string.Join("|", chunk);
+                if (!ExecuteCommand($"/torrents/{command}", parms))
+                    return false;
+            }
+
+            return true;
         }
 
         /// <summary>
@@ -195,15 +220,24 @@ namespace QbtManager
         /// <param name="taskIds"></param>
         /// <param name="maxRatio">Maximum Ratio, -2 = none, -1 = use global, other value = custom ratio per torrent</param>
         /// <param name="maxSeedingTime">Maximum Seeding Time, -2 = none, -1 = use global, other value = minutes to seed this torrent</param>
+        /// <param name="maxInactiveSeedingTime">Maximum Inactive Seeding Time, -2 = none, -1 = use global, other value = minutes to seed this torrent while inactive</param>
+        /// maxInactiveSeedingTime exists after qBittorrent 4.6.0 so it needs to be handled here
         /// <returns></returns>
-        public bool SetMaxLimits(string[] taskIds, float maxRatio, int maxSeedingTime)
+        public bool SetMaxLimits(string[] taskIds, float maxRatio, int maxSeedingTime, int maxInactiveSeedingTime)
         {
             var parms = new Dictionary<string, string>();
 
             parms["hashes"] = string.Join("|", taskIds);
             parms["ratioLimit"] = maxRatio.ToString();
             parms["seedingTimeLimit"] = maxSeedingTime.ToString();
-            Utils.Log("Setting Limits to ratio " + parms["ratioLimit"] + " seeding time " + parms["seedingTimeLimit"] + " for " + taskIds.Length.ToString() + " tasks ");
+
+            if (qbtVersion != null && (qbtVersion.CompareTo(new Version(4, 6, 0)) >= 0))
+            {
+                parms["inactiveSeedingTimeLimit"] = maxInactiveSeedingTime.ToString();
+            }
+
+            Utils.Log($"Setting Limits to ratio {parms["ratioLimit"]} seeding time {parms["seedingTimeLimit"]} minutes {(parms.TryGetValue("inactiveSeedingTimeLimit", out string inactiveSeedingTimeLimit) ? $"inactive seeding time {inactiveSeedingTimeLimit} minutes" : "")} for {taskIds.Length} tasks");
+
             return ExecuteCommand("/torrents/setShareLimits", parms);
         }
 
@@ -253,6 +287,7 @@ namespace QbtManager
             return queryResult.StatusCode == HttpStatusCode.OK;
         }
 
+        
         /// <summary>
         /// Generic REST method handler.
         /// </summary>
@@ -261,16 +296,19 @@ namespace QbtManager
         /// <param name="parms"></param>
         /// <param name="method"></param>
         /// <returns></returns>
-        public T MakeRestRequest<T>(string requestMethod, IDictionary<string, string> parms, Method method = Method.Get) where T : new()
+        public string MakeRestRequest(string requestMethod, IDictionary<string, string>? parms)
         {
-            var request = new RestRequest(requestMethod, method );
+            var request = new RestRequest(requestMethod, Method.Get );
 
-            foreach (var kvp in parms)
-                request.AddParameter(kvp.Key, kvp.Value, ParameterType.GetOrPost);
-
+            if (parms != null)
+            {
+                foreach (var kvp in parms)
+                    request.AddParameter(kvp.Key, kvp.Value, ParameterType.GetOrPost);
+            }
+            
             try
             {
-                var queryResult = client.Execute<T>(request);
+                var queryResult = client.Execute<string>(request);
 
                 if (queryResult != null)
                 {
@@ -280,21 +318,60 @@ namespace QbtManager
                     }
                     else
                     {
-                        JsonSerializerOptions options = new JsonSerializerOptions();
-                        options.Converters.Add(new UnixToNullableDateTimeConverter());
-
-                        T response = JsonSerializer.Deserialize<T>(queryResult.Content, options);
-
-                        if (response != null)
-                        {
-                            return response;
-                        }
-                        else
-                            Utils.Log("No response Data.");
+                        return queryResult.Content;
                     }
                 }
                 else
                     Utils.Log("No valid queryResult.");
+            }
+            catch (Exception ex)
+            {
+                Utils.Log("Exception: {0}: {1}", ex.Message, ex);
+            }
+
+            return string.Empty;
+        }
+
+        /// <summary>
+        /// Generic REST method handler.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="requestMethod"></param>
+        /// <param name="parms"></param>
+        /// <param name="method"></param>
+        /// <returns></returns>
+        public T MakeRestRequest<T>(string requestMethod, IDictionary<string, string>? parms, Method method = Method.Get)
+        {
+            var request = new RestRequest(requestMethod, method );
+
+            if (parms != null)
+            {
+                foreach (var kvp in parms)
+                    request.AddParameter(kvp.Key, kvp.Value, ParameterType.GetOrPost);
+            }
+            
+            try
+            {
+                var queryResult = client.Execute<T>(request);
+
+                if (queryResult.StatusCode != HttpStatusCode.OK)
+                {
+                    Utils.Log("Error: {0} - {1}", queryResult.StatusCode, queryResult.Content);
+                }
+                else
+                {
+                    JsonSerializerOptions options = new JsonSerializerOptions();
+                    options.Converters.Add(new UnixToNullableDateTimeConverter());
+
+                    T response = JsonSerializer.Deserialize<T>(queryResult.Content, options);
+
+                    if (response != null)
+                    {
+                        return response;
+                    }
+                    else
+                        Utils.Log("No response Data.");
+                }
             }
             catch (Exception ex)
             {
