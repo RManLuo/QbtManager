@@ -44,17 +44,17 @@ jobs:
       run: zip ./artifacts/QbtManager-linux.zip ./artifacts/QbtManager-linux/QbtManager
       
     - name: Upload win to Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: QbtManager-win.zip
         path: ./artifacts/QbtManager-win.zip
     - name: Upload mac to Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: QbtManager-osx.zip
         path: ./artifacts/QbtManager-osx.zip
     - name: Upload linux to Artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: QbtManager-linux.zip
         path: ./artifacts/QbtManager-linux.zip
